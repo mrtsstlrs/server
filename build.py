@@ -2157,6 +2157,48 @@ def backend_clone(
     clone_script.cwd(build_dir)
     clone_script.gitclone(backend_repo(be), tag, be, github_organization)
 
+    if be == "vllm":
+        model_path = os.path.join(build_dir, be, "src", "model.py")
+        clone_script.comment("Patch vLLM backend for compatibility with public vLLM")
+        clone_script.cmd(
+            f"""python3 - <<'PY'
+import pathlib
+import re
+
+path = pathlib.Path({model_path!r})
+text = path.read_text()
+
+if "stat_loggers=self._vllm_metrics" in text and "engine_kwargs = dict(" not in text:
+    if "import inspect" not in text:
+        text = text.replace("import asyncio\\n", "import asyncio\\nimport inspect\\n", 1)
+    pattern = (
+        r"async with build_async_engine_client_from_engine_args\\(\\n"
+        r"\\s*engine_args=self\\._aync_engine_args,\\n"
+        r"\\s*disable_frontend_multiprocessing=self\\._enable_metrics,\\n"
+        r"\\s*stat_loggers=self\\._vllm_metrics,\\n"
+        r"\\s*\\) as engine:"
+    )
+    replacement = (
+        "engine_kwargs = dict(\\n"
+        "                engine_args=self._aync_engine_args,\\n"
+        "                disable_frontend_multiprocessing=self._enable_metrics,\\n"
+        "            )\\n"
+        "            if \\"stat_loggers\\" in inspect.signature(\\n"
+        "                build_async_engine_client_from_engine_args\\n"
+        "            ).parameters:\\n"
+        "                engine_kwargs[\\"stat_loggers\\"] = self._vllm_metrics\\n"
+        "            async with build_async_engine_client_from_engine_args(**engine_kwargs) as engine:"
+    )
+    if re.search(pattern, text):
+        text = re.sub(pattern, replacement, text, count=1)
+        path.write_text(text)
+    else:
+        print("vllm patch: pattern not found, skipping")
+else:
+    print("vllm patch: already patched or stat_loggers not present, skipping")
+PY"""
+        )
+
     repo_target_dir = os.path.join(install_dir, "backends")
     clone_script.mkdir(repo_target_dir)
     backend_dir = os.path.join(repo_target_dir, be)
